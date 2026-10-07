@@ -34,10 +34,15 @@ c[2].metric("BB fold vs min-raise", format_stat(v, n),
 flags = common.apply_filters(common.leak_flags(), filters)
 pf = flags[flags["kind"].isin(["missed_shove", "loose_shove", "small_open_short", "loose_call_shove",
                                "tight_fold_shove"])]
-short_spots = int((hands["game"].eq("holdem") & hands["pf_decision"] & (hands["eff_stack_bb"] <= leaks.PUSH_FOLD_MAX_BB)).sum())
-c[3].metric("Push/fold deviations", f"{len(pf)} of {short_spots}",
-            help=f"Hold'em hands at or below {leaks.PUSH_FOLD_MAX_BB:g} BB effective where your play differed from "
-                 "the approximate chip-EV chart.")
+gto = common.apply_filters(common.gto_rows(), filters)
+gto = gto[gto["player_id"] == gto["hero_id"]]
+nash = gto[gto["source"] == "nash"]
+c[3].metric("Push/fold deviations", f"{len(pf)} of {len(nash)}",
+            help=f"Push/fold leak flags out of your push/fold spots: Hold'em decisions at or below "
+                 f"{leaks.PUSH_FOLD_MAX_BB:g} BB effective, first in or facing a lone shove, compared with the "
+                 f"Nash equilibrium for that spot. Flagged when the equilibrium takes your action less than 10% "
+                 f"of the time and it cost at least {leaks.MIN_FLAG_EV_BB:g} BB of chip EV, or when you opened "
+                 f"for less than all-in at {leaks.SHOVE_ONLY_BB:g} BB or less.")
 
 # ---- Flagged hands ---------------------------------------------------------------------
 st.subheader("Flagged hands")
@@ -56,8 +61,48 @@ else:
         "flagged", {"hand_id": None, "number": "hand #", "hole_cards": "cards",
                     "net_bb": st.column_config.NumberColumn("net BB", format="%+.1f"),
                     "message": st.column_config.TextColumn("why", width="large")})
-st.caption("Push/fold charts are approximate chip-EV ranges with no antes and no ICM; near the bubble or a pay jump "
-           "a flagged fold can still be right. Flags are prompts to review a hand, not verdicts.")
+st.caption("Push/fold flags compare your play with the Nash equilibrium of the push-or-fold game for each hand's "
+           "real stacks, blinds and antes. It is chip EV with no ICM, so near the bubble or a pay jump a flagged "
+           "fold can still be right. Flags are prompts to review a hand, not verdicts.")
+
+# ---- GTO chart comparison ----------------------------------------------------------------
+st.subheader("GTO chart comparison")
+if gto.empty:
+    everything = common.gto_rows()
+    if (everything["player_id"] == everything["hero_id"]).any() or "holdem" not in filters["games"]:
+        st.caption("No compared decisions in the selected hands. GTO comparisons are Hold'em only.")
+    else:
+        st.caption(f"No preflop decisions compared yet. Push/fold spots at {leaks.PUSH_FOLD_MAX_BB:g} BB or less "
+                   "are compared automatically; for deeper spots, add your own charts on the GTO Charts page.")
+    st.page_link("pages/7_GTO_Charts.py", label="GTO charts: push/fold explorer and your own charts",
+                 icon=":material/grid_on:")
+else:
+    c = st.columns(4)
+    c[0].metric("Decisions compared", len(gto[["hand_id", "seq"]].drop_duplicates()),
+                help="Your first preflop decision in each hand that matched a chart: push/fold spots and spots "
+                     "covered by your own charts. A decision that more than one chart covers counts once here and "
+                     "has a row per chart below.")
+    c[1].metric("Agree with the chart", format_stat(100 * gto["verdict"].eq("agrees").mean(), len(gto)),
+                help="Share of comparisons (one per decision and chart) where the chart takes your action at least "
+                     "half the time. Mixed: 10-50%. Deviates: under 10%. Off-chart: a limp or small raise in a "
+                     "push-or-fold spot, which the model doesn't include.")
+    c[2].metric("EV lost vs Nash", f"{nash['ev_loss_bb'].sum():.2f} BB",
+                help=f"Chip EV given up against the Nash push/fold equilibrium, summed over {len(nash)} push/fold "
+                     "decisions. Your own charts carry no EVs.")
+    c[3].metric("Deviations", int(gto["verdict"].eq("deviates").sum()),
+                help="Comparisons where the chart takes your action less than 10% of the time.")
+    st.caption("Push/fold spots (first in, or facing a lone first-in shove, at most "
+               f"{leaks.PUSH_FOLD_MAX_BB:g} BB effective) are compared with the Nash equilibrium of the push-or-fold "
+               "game, solved for the hand's real stacks, blinds, antes and players left to act: chip EV, no ICM, "
+               "at most one caller. Deeper raise-first-in and facing-an-open spots are compared with your own "
+               "charts.")
+    st.page_link("pages/7_GTO_Charts.py", label="GTO charts: push/fold explorer and your own charts",
+                 icon=":material/grid_on:")
+    counts = gto["verdict"].value_counts()
+    order = [v for v in ["deviates", "mixed", "off-chart", "agrees"] if v in counts]
+    verdicts = st.pills("Verdict", order, selection_mode="multi", default=order,
+                        format_func=lambda v: f"{v} ({counts[v]})", key="gto_verdicts")
+    common.gto_table(gto[gto["verdict"].isin(verdicts or [])], "gto_hero")
 
 # ---- All-in luck -------------------------------------------------------------------------
 st.subheader("All-in luck: actual vs expected")

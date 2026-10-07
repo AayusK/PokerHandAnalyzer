@@ -10,3 +10,6 @@ data/raw/*
 !data/raw/.gitkeep
 data/*.db
 data/*.db-*
+
+# Your own GTO chart files: ranges exported from a paid tool are usually covered by its licence.
+data/charts/

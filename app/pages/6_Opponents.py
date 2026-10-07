@@ -72,6 +72,15 @@ st.dataframe(table, hide_index=True, width="stretch",
              column_config={label: st.column_config.TextColumn(label, help=STAT_HELP[key])
                             for key, label in STAT_LABELS.items()})
 
+# ---- Shown hands vs GTO charts -----------------------------------------------------------
+vs_gto = common.apply_filters(common.gto_rows(), filters)
+vs_gto = vs_gto[vs_gto["player_id"] == pid]
+if not vs_gto.empty:
+    st.subheader("vs GTO charts")
+    st.caption("Their first preflop decision in hands they showed, compared with the Nash push/fold equilibrium "
+               "and your own charts.")
+    common.gto_table(vs_gto, "opp_gto", action_label="their action")
+
 # ---- Hands they showed ------------------------------------------------------------------
 st.subheader("Hands they showed")
 shown = mine[mine["showed"]]

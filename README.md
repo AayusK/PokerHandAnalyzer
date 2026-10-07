@@ -4,15 +4,17 @@ A local tool that reads [PokerNow](https://www.pokernow.club) hand-history expor
 your play, tracks results over time and scouts opponents.
 
 - **Find leaks:** rule-based flags (limping, loose early-position play, folding the big blind to
-  min-raises), short-stack shove/fold checks against approximate charts, and all-in luck: what your
-  all-ins actually won compared with what your equity was worth.
+  min-raises), preflop decisions compared with GTO charts (computed Nash push/fold charts for short
+  stacks, with the chip EV each deviation cost, and your own charts for deeper spots), and all-in luck:
+  what your all-ins actually won compared with what your equity was worth.
 - **Track results:** stack graph for each tournament, results in big blinds by position, game and stack
   depth, and cumulative results across sessions (actual and all-in adjusted).
 - **Scout opponents:** tracker stats for every player, plus every hand each one showed, with their betting
   line.
 
 Hold'em and PLO are both parsed and get stats; equity uses `eval7` (Hold'em) and `phevaluator` (PLO).
-Out of scope for now: LLM hand commentary, solver comparisons, other sites' formats.
+Out of scope for now: LLM hand commentary, postflop and deep-stack solving (bring your own charts for
+deep-stack preflop spots), other sites' formats.
 
 ## Quick start
 
@@ -45,9 +47,10 @@ number of chances it was measured on, e.g. `22% (n=9)`.
 | Import | Upload exports ("N hands added, M duplicates"), edit tournament results, rebuild or delete sessions |
 | Results | Stack across a tournament (table changes marked), net BB by position / game / starting stack, cumulative results across sessions with an all-in adjusted line, biggest wins and losses |
 | My stats | VPIP, PFR, open raise, limp, 3-bet, flop c-bet, fold to c-bet, WTSD, W$SD, BB fold vs min-raise, aggression factor and frequency, sliced by position, game, stack depth, table size or session |
-| Leaks | Headline leak rates, flagged hands with the reason, all-in luck (expected vs actual) |
+| Leaks | Headline leak rates, flagged hands with the reason, GTO chart comparison (agreement and EV lost, the 13x13 chart for each spot), all-in luck (expected vs actual) |
 | Hands | Filterable hand list; select a hand for a step-by-step text replay with pot and stack sizes in BB |
-| Opponents | Every opponent's stats, and each hand they showed with cards, board, betting line and result |
+| Opponents | Every opponent's stats, and each hand they showed with cards, board, betting line, result and GTO chart comparison |
+| GTO Charts | Nash push/fold explorer (players left to act, stack, ante), and your own charts with any files that failed to load |
 
 Selecting a row in any hand table opens its replay underneath.
 
@@ -60,12 +63,17 @@ pokeranalyzer/
   db.py       # SQLite schema, idempotent import, rebuild from stored raw JSON, dashboard queries
   stats.py    # per-hand stat flags for any player, aggregation with sample sizes
   equity.py   # Hold'em + PLO equity (exact or seeded Monte Carlo), side pots, all-in luck
-  leaks.py    # rule-based flags and short-stack push/fold checks
-  ranges.py   # Hold'em hand classes, strength ranking, range notation ("77+, ATs+, KQo")
+  leaks.py    # rule-based flags, plus flags from the GTO chart comparisons
+  gto.py      # Nash push/fold solver, and comparing short-stack decisions with it
+  charts.py   # loading your own GTO chart files, and comparing decisions with them
+  ranges.py   # Hold'em hand classes, strength ranking, range notation ("77+, ATs+, KQo:0.5")
   replay.py   # text replays and compact betting lines
+  data/preflop_equity.json  # class-vs-class preflop equity (built by scripts/build_equity_matrix.py)
 app/          # Streamlit: Home.py + pages/
 data/raw/     # your exported JSON files (git-ignored)
-docs/         # notes on the PokerNow export format
+data/charts/  # your own GTO chart files (optional)
+docs/         # notes on the PokerNow export format, the GTO chart format and an example chart
+scripts/      # build_equity_matrix.py
 tests/        # parser, stats, equity, db and leak tests on an anonymised sample tournament
 ```
 
@@ -100,20 +108,45 @@ rates):
 | Flag | Rule |
 |---|---|
 | Limped in | First in with a call (or completing the SB), or over-limping |
-| Loose from early position | Played a hand from UTG/UTG+n outside `66+, A9s+, KTs+, QTs+, JTs, T9s, AJo+, KQo` |
+| Loose from early position | Played a hand from UTG/UTG+n outside `66+, A9s+, KTs+, QTs+, JTs, T9s, AJo+, KQo` (above 15 BB) |
 | Folded BB to a min-raise | Folded a top-50% hand in the BB to a single raise of at most 2 BB |
-| Folded a chart shove / Shoved outside the chart | At ≤ 15 BB effective and folded to you, compared with "shove the top X%" |
-| Opened small when short | Limped or min-raised at ≤ 8 BB instead of shove-or-fold |
-| Folded to / called a shove | In the BB facing a lone shove, compared with an approximate call range |
+| Folded a Nash shove / Shoved outside the Nash range | Folded to you at ≤ 15 BB effective: you folded a hand the Nash push/fold chart shoves (or shoved one it folds) |
+| Folded a Nash call vs a shove / Called a shove outside the Nash range | Facing a lone first-in shove at ≤ 15 BB: folded a hand the Nash chart calls (or called one it folds) |
+| Opened small when short | Limped or raised less than all-in, first in at ≤ 8 BB, instead of shove-or-fold |
+| Off your GTO chart | One of your own charts takes the action you took less than 10% of the time |
 
-The short-stack charts are approximate chip-EV ranges with no antes and no ICM: the share of hands to
-shove depends on players left to act and effective stack, and hands are ranked by equity against a random
-hand. A deviation is flagged only when it is more than 7 percentile points outside the chart. All the
-thresholds are constants at the top of `pokeranalyzer/leaks.py`.
+A push/fold flag needs the chart to take your action less than 10% of the time and the deviation to cost
+at least 0.05 BB of chip EV; the message gives the chart frequency and the EV lost. The thresholds are
+constants at the top of `pokeranalyzer/leaks.py`.
+
+**GTO charts.** The first preflop decision of every player whose cards are known (you, and opponents
+who showed) is compared with a chart when one fits the spot, and stored with the chart's frequencies for
+that hand, the verdict (agrees: the chart takes that action at least 50% of the time; mixed: 10–50%;
+deviates: under 10%) and, for push/fold, the chip EV lost.
+
+- *Nash push/fold* (built in). At 15 BB effective or less, first-in decisions and calls of a lone
+  first-in shove are compared with the Nash equilibrium of the push-or-fold game for that exact spot:
+  the hand's stacks, blinds, antes and players left to act. It is solved on the fly (usually in under a
+  tenth of a second) from a precomputed class-vs-class preflop equity matrix with card removal. The
+  model simplifies: chip EV with no ICM, so near the bubble or a pay jump a flagged fold can still be
+  right; push or fold only (a limp or smaller raise is shown as off-chart); at most one caller, since
+  everyone behind a caller is assumed to fold; and callers' hands are independent of each other. That
+  last one overstates the shover's fold equity with many players left to act (a folder's low cards
+  leave more high cards for the players behind), so early-position push ranges come out slightly too
+  wide and the EV of a marginal hand can be off by up to about 0.07 BB.
+- *Your own charts.* For deeper spots (raise first in, and facing a single open) you supply the ranges
+  as JSON files in `data/charts/` (or the folder `POKER_CHARTS` points to), e.g. exported from a solver
+  or training tool you have a licence for. These carry frequencies only, so no EV. The format, matching
+  rules and an illustrative example are in [docs/gto-charts.md](docs/gto-charts.md).
+
+Charts are applied when hands are imported. After adding or changing a chart file, use **Rebuild** on
+the Import page to compare stored hands with it; a database created before GTO comparisons existed also
+gets them (and the Nash-based leak flags) on Rebuild.
 
 ## Assumptions and limits
 
 - Tournament results (place, field size, prize) aren't in the export; enter them on the Import page.
-- Antes, straddles, bomb pots and double boards aren't modelled; such hands import with a warning.
+- Straddles, bomb pots and double boards aren't modelled; such hands import with a warning and get no
+  GTO chart comparison. Antes are used by the push/fold model but not by the chip replay.
 - Run-it-twice boards are parsed (later runs reuse cards already dealt), but no sample export has one yet.
 - Imports are manual (download the JSON, drop it in).

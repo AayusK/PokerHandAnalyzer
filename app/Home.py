@@ -33,6 +33,9 @@ st.page_link("pages/2_Results.py", label="Results: stack graphs, results by posi
              icon=":material/show_chart:")
 st.page_link("pages/3_My_Stats.py", label="My stats: VPIP, PFR, 3-bet, c-bet and more, with sample sizes",
              icon=":material/table_chart:")
-st.page_link("pages/4_Leaks.py", label="Leaks: flagged hands, push/fold checks, all-in luck", icon=":material/flag:")
+st.page_link("pages/4_Leaks.py", label="Leaks: flagged hands, GTO chart comparison, all-in luck",
+             icon=":material/flag:")
 st.page_link("pages/5_Hands.py", label="Hands: filter and replay any hand", icon=":material/playing_cards:")
 st.page_link("pages/6_Opponents.py", label="Opponents: stats and every hand they showed", icon=":material/groups:")
+st.page_link("pages/7_GTO_Charts.py", label="GTO charts: Nash push/fold explorer and your own preflop charts",
+             icon=":material/grid_on:")

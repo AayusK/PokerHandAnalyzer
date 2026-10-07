@@ -1,0 +1,46 @@
+{
+  "name": "Format example — not real GTO ranges",
+  "source": "Hand-typed placeholder ranges that only show the file format. They are NOT solver output; replace them with ranges from a solver or training tool you have a licence for.",
+  "spots": [
+    {
+      "situation": "rfi",
+      "positions": ["UTG", "UTG+1", "UTG+2"],
+      "stack_bb": [25, 1000],
+      "players": [7, 10],
+      "actions": {"raise": "77+, ATs+, KTs+, QJs, AJo+, KQo:0.5"}
+    },
+    {
+      "situation": "rfi",
+      "position": "BTN",
+      "stack_bb": [25, 1000],
+      "actions": {"raise": "22+, A2s+, K8s+, Q9s+, J9s+, T9s, 98s, A8o+, KTo+, QJo:75%"}
+    },
+    {
+      "situation": "rfi",
+      "position": "SB",
+      "stack_bb": [15, 25],
+      "actions": {
+        "allin": "22-66, A2s-A9s, A2o-A9o:0.5",
+        "raise": "77+, ATs+, KQs, ATo+",
+        "limp": "K2s-KJs, Q8s+, J8s+, T8s, 98s, K9o+, A2o-A9o:0.5"
+      }
+    },
+    {
+      "situation": "vs_open",
+      "position": "BB",
+      "opener": ["CO", "BTN"],
+      "stack_bb": [25, 1000],
+      "actions": {
+        "3bet": "QQ+, AKs, A5s:0.5, AKo",
+        "call": "22-JJ, A2s-A4s, A6s-AQs, A5s:0.5, KTs+, QTs+, JTs, T9s, 98s, ATo-AQo, KJo+"
+      }
+    },
+    {
+      "situation": "vs_open",
+      "position": "SB",
+      "opener": "BTN",
+      "stack_bb": [12, 25],
+      "actions": {"allin": "77+, A9s+, KQs, ATo+", "call": "22-66:0.5"}
+    }
+  ]
+}

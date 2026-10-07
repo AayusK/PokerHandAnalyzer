@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "streamlit>=1.40",
     "pandas>=2.0",
+    "numpy>=1.24",
     "plotly>=5.20",
     "eval7>=0.1.10",
     "phevaluator>=0.5",
@@ -20,6 +21,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["pokeranalyzer"]
+
+[tool.setuptools.package-data]
+pokeranalyzer = ["data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

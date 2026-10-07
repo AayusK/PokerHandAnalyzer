@@ -1,6 +1,8 @@
 """SQLite storage. Every hand's raw JSON is kept, so derived tables can be rebuilt any time.
 
 Importing is idempotent: hands are keyed by their PokerNow id and duplicates are skipped.
+Preflop decisions are compared with GTO charts (computed push/fold, plus the user's chart files)
+at import; ``rebuild`` re-applies the current charts to every stored hand.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import equity, leaks, stats
+from .charts import Chart, all_decisions, load_charts
 from .parser import Hand, assign_tables, chip_replay, parse_export, parse_hand
 
 DEFAULT_DB = Path(__file__).resolve().parents[1] / "data" / "poker.db"
@@ -107,7 +110,35 @@ CREATE TABLE IF NOT EXISTS leak_flags (
     message  TEXT
 );
 CREATE INDEX IF NOT EXISTS leak_flags_hand ON leak_flags(hand_id);
+CREATE TABLE IF NOT EXISTS gto_decisions (
+    hand_id        TEXT REFERENCES hands(id),
+    seq            INTEGER,
+    player_id      TEXT,
+    source         TEXT,
+    situation      TEXT,
+    position       TEXT,
+    eff_stack_bb   REAL,
+    players_behind INTEGER,
+    hand_class     TEXT,
+    action         TEXT,
+    chart_action   TEXT,
+    freqs          TEXT,
+    action_freq    REAL,
+    verdict        TEXT,
+    ev_loss_bb     REAL,
+    title          TEXT,
+    grid           TEXT,
+    evs            TEXT,
+    PRIMARY KEY (hand_id, seq, source)
+);
+CREATE INDEX IF NOT EXISTS gto_decisions_player ON gto_decisions(player_id);
 """
+
+# gto_decisions columns, in GtoDecision.to_row() order; freqs, grid and evs are JSON text.
+GTO_COLUMNS = ("hand_id", "seq", "player_id", "source", "situation", "position", "eff_stack_bb", "players_behind",
+               "hand_class", "action", "chart_action", "freqs", "action_freq", "verdict", "ev_loss_bb", "title",
+               "grid", "evs")
+GTO_JSON_COLUMNS = ("freqs", "grid", "evs")
 
 # hand_players columns come from stats.player_hand_flags (minus the key columns).
 _FLAG_TYPES = {bool: "INTEGER", int: "INTEGER", float: "REAL", str: "TEXT"}
@@ -154,10 +185,12 @@ class ImportResult:
 
 
 def import_export(conn: sqlite3.Connection, data: dict | str | bytes, source_file: str = "",
-                  meta: dict | None = None, equity_iterations: int = equity.DEFAULT_ITERATIONS) -> ImportResult:
+                  meta: dict | None = None, equity_iterations: int = equity.DEFAULT_ITERATIONS,
+                  charts: list[Chart] | None = None) -> ImportResult:
     """Import one PokerNow export. Hands already in the database are skipped.
 
     ``meta`` may hold finishing_place, field_size, buy_in, prize and notes for the session.
+    ``charts``: the user's GTO charts to compare decisions with (None: load the charts directory).
     """
     if isinstance(data, (str, bytes)):
         data = json.loads(data)
@@ -176,6 +209,8 @@ def import_export(conn: sqlite3.Connection, data: dict | str | bytes, source_fil
         existing |= {r[0] for r in conn.execute(
             f"SELECT id FROM hands WHERE id IN ({','.join('?' * len(chunk))})", chunk)}
     new_hands = [h for h in session.hands if h.id not in existing]
+    if charts is None:
+        charts = load_charts()[0]
 
     with conn:
         conn.execute(
@@ -184,19 +219,20 @@ def import_export(conn: sqlite3.Connection, data: dict | str | bytes, source_fil
              source_file))
         for h in new_hands:
             h.tournament = slug
-            _insert_hand(conn, h, equity_iterations)
+            _insert_hand(conn, h, equity_iterations, charts)
         _refresh_session(conn, slug)
         if meta:
             update_session(conn, slug, **meta)
     return ImportResult(slug, len(new_hands), len(existing), problems)
 
 
-def import_file(conn: sqlite3.Connection, path: str | Path, meta: dict | None = None) -> ImportResult:
+def import_file(conn: sqlite3.Connection, path: str | Path, meta: dict | None = None,
+                charts: list[Chart] | None = None) -> ImportResult:
     with open(path, encoding="utf-8") as f:
-        return import_export(conn, json.load(f), source_file=Path(path).name, meta=meta)
+        return import_export(conn, json.load(f), source_file=Path(path).name, meta=meta, charts=charts)
 
 
-def _insert_hand(conn: sqlite3.Connection, h: Hand, equity_iterations: int) -> None:
+def _insert_hand(conn: sqlite3.Connection, h: Hand, equity_iterations: int, charts: list[Chart]) -> None:
     conn.execute(
         "INSERT INTO hands (id, session, number, table_no, game, small_blind, big_blind, ante, dealer_seat,"
         " started_at, num_players, hero_id, board, pot, showdown, warnings, raw)"
@@ -204,10 +240,10 @@ def _insert_hand(conn: sqlite3.Connection, h: Hand, equity_iterations: int) -> N
         (h.id, h.tournament, h.number, h.table, h.game, h.small_blind, h.big_blind, h.ante, h.dealer_seat,
          h.started_at, h.num_players, h.hero_id, " ".join(h.board), h.pot, int(h.showdown),
          "\n".join(h.warnings), json.dumps(h.raw)))
-    _insert_derived(conn, h, equity_iterations)
+    _insert_derived(conn, h, equity_iterations, charts)
 
 
-def _insert_derived(conn: sqlite3.Connection, h: Hand, equity_iterations: int | None) -> None:
+def _insert_derived(conn: sqlite3.Connection, h: Hand, equity_iterations: int | None, charts: list[Chart]) -> None:
     for p in h.players:
         conn.execute(
             "INSERT INTO players (id, name, first_seen, last_seen) VALUES (?, ?, ?, ?)"
@@ -228,7 +264,12 @@ def _insert_derived(conn: sqlite3.Connection, h: Hand, equity_iterations: int | 
           a.to_call, a.stack_before, a.raises_before, a.eff_stack_bb) for a in h.actions])
     conn.execute("DELETE FROM leak_flags WHERE hand_id = ?", (h.id,))
     conn.executemany("INSERT INTO leak_flags (hand_id, kind, severity, message) VALUES (?, ?, ?, ?)",
-                     [(f.hand_id, f.kind, f.severity, f.message) for f in leaks.hand_flags(h)])
+                     [(f.hand_id, f.kind, f.severity, f.message) for f in leaks.hand_flags(h, charts)])
+    # GTO chart comparisons for every player whose cards are known (the hero, and opponents who showed).
+    conn.execute("DELETE FROM gto_decisions WHERE hand_id = ?", (h.id,))
+    rows = [d.to_row() for p in h.players if p.cards_known for d in all_decisions(h, charts, p.id)]
+    conn.executemany(f"INSERT OR REPLACE INTO gto_decisions ({','.join(GTO_COLUMNS)})"
+                     f" VALUES ({','.join('?' * len(GTO_COLUMNS))})", [[r[c] for c in GTO_COLUMNS] for r in rows])
     if equity_iterations is not None:
         conn.execute("DELETE FROM allin WHERE hand_id = ?", (h.id,))
         conn.executemany(
@@ -255,15 +296,20 @@ def _refresh_session(conn: sqlite3.Connection, slug: str) -> None:
                      (hands[0].started_at, hands[-1].started_at, slug))
 
 
-def rebuild(conn: sqlite3.Connection, recompute_equity: bool = False) -> int:
-    """Re-derive players, flags, actions and leak flags from the stored raw JSON."""
+def rebuild(conn: sqlite3.Connection, recompute_equity: bool = False, charts: list[Chart] | None = None) -> int:
+    """Re-derive players, flags, actions, leak flags and GTO comparisons from the stored raw JSON.
+
+    ``charts``: the user's GTO charts to compare decisions with (None: load the charts directory).
+    """
+    if charts is None:
+        charts = load_charts()[0]
     slugs = [r[0] for r in conn.execute("SELECT slug FROM sessions")]
     count = 0
     with conn:
         for slug in slugs:
             _refresh_session(conn, slug)
             for h in _session_hands(conn, slug):
-                _insert_derived(conn, h, equity.DEFAULT_ITERATIONS if recompute_equity else None)
+                _insert_derived(conn, h, equity.DEFAULT_ITERATIONS if recompute_equity else None, charts)
                 count += 1
     return count
 
@@ -284,7 +330,7 @@ def update_session(conn: sqlite3.Connection, slug: str, **fields) -> None:
 def delete_session(conn: sqlite3.Connection, slug: str) -> None:
     with conn:
         ids = "SELECT id FROM hands WHERE session = ?"
-        for table in ("leak_flags", "allin", "actions", "hand_players"):
+        for table in ("gto_decisions", "leak_flags", "allin", "actions", "hand_players"):
             conn.execute(f"DELETE FROM {table} WHERE hand_id IN ({ids})", (slug,))
         conn.execute("DELETE FROM hands WHERE session = ?", (slug,))
         conn.execute("DELETE FROM sessions WHERE slug = ?", (slug,))
@@ -347,6 +393,28 @@ def leak_flags_df(conn: sqlite3.Connection) -> pd.DataFrame:
         "SELECT f.*, h.session, h.number, h.game, h.started_at, h.big_blind, hp.position, hp.hole_cards, hp.net,"
         " hp.eff_stack_bb FROM leak_flags f JOIN hands h ON h.id = f.hand_id"
         " JOIN hand_players hp ON hp.hand_id = f.hand_id AND hp.player_id = h.hero_id ORDER BY h.started_at", conn)
+
+
+def gto_df(conn: sqlite3.Connection, player_id: str | None = None, hero: bool = False) -> pd.DataFrame:
+    """GTO chart comparisons joined with hand info; freqs, grid and evs parsed back from JSON.
+
+    ``hero=True`` keeps only each hand's hero. Columns: the gto_decisions columns plus session,
+    number, table_no, game, started_at, big_blind, hero_id, name and hole_cards.
+    """
+    where, params = [], []
+    if player_id:
+        where.append("g.player_id = ?")
+        params.append(player_id)
+    if hero:
+        where.append("g.player_id = h.hero_id")
+    sql = ("SELECT g.*, h.session, h.number, h.table_no, h.game, h.started_at, h.big_blind, h.hero_id, hp.name,"
+           " hp.hole_cards FROM gto_decisions g JOIN hands h ON h.id = g.hand_id"
+           " LEFT JOIN hand_players hp ON hp.hand_id = g.hand_id AND hp.player_id = g.player_id"
+           + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY h.started_at, h.id, g.seq, g.source")
+    df = pd.read_sql_query(sql, conn, params=params)
+    for col in GTO_JSON_COLUMNS:
+        df[col] = [json.loads(v) if isinstance(v, str) else None for v in df[col]]
+    return df
 
 
 def players_df(conn: sqlite3.Connection) -> pd.DataFrame:
