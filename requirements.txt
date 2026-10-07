@@ -1,0 +1,6 @@
+streamlit>=1.40
+pandas>=2.0
+plotly>=5.20
+eval7>=0.1.10
+phevaluator>=0.5
+pytest>=8.0

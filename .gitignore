@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Local data: exports contain other players' names, and the database is rebuilt from them.
+data/raw/*
+!data/raw/.gitkeep
+data/*.db
+data/*.db-*

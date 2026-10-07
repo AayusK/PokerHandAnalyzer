@@ -1,0 +1,26 @@
+[project]
+name = "pokeranalyzer"
+version = "0.1.0"
+description = "Leak finder, results tracker and opponent scout for PokerNow hand histories"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.40",
+    "pandas>=2.0",
+    "plotly>=5.20",
+    "eval7>=0.1.10",
+    "phevaluator>=0.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pokeranalyzer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
